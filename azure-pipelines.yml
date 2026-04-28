@@ -13,6 +13,7 @@ stages:
     timeoutInMinutes: 300
     pool:
       name: Default
+      vmImage: 'windows-latest'
       demands:
       - msbuild
       - vstest
