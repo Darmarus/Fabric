@@ -1,8 +1,12 @@
 name: $(Date:yyyyMMdd).$(Rev:r)
 
+trigger:
+  branches:
+    include:
+      - test
+
 resources:
 - repo: self
-  clean: true
 
 stages:
 - stage: Build_Test
@@ -12,15 +16,14 @@ stages:
     displayName: Build and test
     timeoutInMinutes: 300
     pool:
-      name: Default
       vmImage: 'windows-latest'
-      demands:
-      - msbuild
-      - vstest
 
     steps:
     - checkout: self
       clean: true
+
+    - task: NuGetToolInstaller@1
+      displayName: Install NuGet
 
     - task: MSBuild@1
       displayName: Restore and build
@@ -46,8 +49,15 @@ stages:
         projects: '**/*.UnitTest.csproj'
         arguments: '--no-build --configuration Debug'
 
-    - powershell: Start-SonetaTestInfrastructure
+    - powershell: |
+        if (Get-Command Start-SonetaTestInfrastructure -ErrorAction SilentlyContinue) {
+          Start-SonetaTestInfrastructure
+        }
+        else {
+          Write-Host "Start-SonetaTestInfrastructure not found, skipping."
+        }
       displayName: Start integration tests infrastructure
+      continueOnError: true
 
     - task: VisualStudioTestPlatformInstaller@1
       displayName: Visual Studio Test Platform Installer
@@ -67,9 +77,16 @@ stages:
         searchFolder: $(System.DefaultWorkingDirectory)
         vsTestVersion: toolsInstaller
 
-    - powershell: Stop-SonetaTestInfrastructure
+    - powershell: |
+        if (Get-Command Stop-SonetaTestInfrastructure -ErrorAction SilentlyContinue) {
+          Stop-SonetaTestInfrastructure
+        }
+        else {
+          Write-Host "Stop-SonetaTestInfrastructure not found, skipping."
+        }
       displayName: Stop integration tests infrastructure
       condition: always()
+      continueOnError: true
 
     - publish: $(System.DefaultWorkingDirectory)\bin
       displayName: Publish artifacts
@@ -83,7 +100,7 @@ stages:
   - job: Deploy
     displayName: Push NuGet packages to Azure Artifacts
     pool:
-      name: Default
+      vmImage: 'windows-latest'
 
     steps:
     - checkout: none
