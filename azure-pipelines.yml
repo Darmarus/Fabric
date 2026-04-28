@@ -1,69 +1,102 @@
-trigger:
-- master
+name: $(Date:yyyyMMdd).$(Rev:r)
 
-pool:
-  vmImage: 'windows-latest'
-  demands:
-  - msbuild
-  - visualstudio
+resources:
+- repo: self
+  clean: true
 
-variables:
-  solution: '**/*.sln'
-  buildPlatform: 'Any CPU'
-  buildConfiguration: 'Release'
+stages:
+- stage: Build_Test
+  displayName: Build and test
+  jobs:
+  - job: Build_Test
+    displayName: Build and test
+    timeoutInMinutes: 300
+    pool:
+      name: Default
+      demands:
+      - msbuild
+      - vstest
 
-steps:
-- task: NuGetToolInstaller@1
+    steps:
+    - checkout: self
+      clean: true
 
-- task: NuGetCommand@2
-  inputs:
-    restoreSolution: '$(solution)'
+    - task: MSBuild@1
+      displayName: Restore and build
+      inputs:
+        solution: '**/*.csproj'
+        configuration: Debug
+        msbuildArguments: '/r /p:GeneratePackageOnBuild=true'
 
-- task: Assembly-Info-NetFramework@2
-  inputs:
-    FileNames: |
-      **\AssemblyInfo.cs
-      **\AssemblyInfo.vb
-      **\GlobalInfo.vb
-      **\GlobalInfo.cs
-      **/NetCoreLib.csproj
-      **/NetCoreConsoleApp.csproj
-      **/NetCoreWebApp.csproj
-    InsertAttributes: true
-    WriteBOM: true
-    Title: '$(Build.DefinitionName)'
-    Product: '$(Build.DefinitionName)'
-    Company: 'Agemit Sp. z o.o.'
-    Copyright: 'Copyright © $(date:DD MMMM YYYY) Agemit Sp. z o.o.'
-    Trademark: MD
-    VersionNumber: '$(date:YYMM).$(Build.BuildId).$(date:DD).$(date:HHmm)'
-    FileVersionNumber: '$(date:YYMM).$(Build.BuildId).$(date:DD).$(date:HHmm)'
-    InformationalVersion: '$(date:YYMM).$(Build.BuildId).$(date:DD).$(date:HHmm)'
+    - powershell: |
+        if (Get-ChildItem -Recurse -Filter *.UnitTest.csproj -File) {
+          Write-Host "##vso[task.setVariable variable=RunUnitTests]True"
+        }
+        else {
+          Write-Host "##vso[task.setVariable variable=RunUnitTests]False"
+        }
+      displayName: Discover unit tests
 
+    - task: DotNetCoreCLI@2
+      condition: and(succeeded(), eq(variables['RunUnitTests'], 'True'))
+      displayName: Run unit tests
+      inputs:
+        command: test
+        projects: '**/*.UnitTest.csproj'
+        arguments: '--no-build --configuration Debug'
 
-- task: VSBuild@1
-  inputs:
-    solution: '$(solution)'
-    platform: '$(buildPlatform)'
-    configuration: '$(buildConfiguration)'
+    - powershell: Start-SonetaTestInfrastructure
+      displayName: Start integration tests infrastructure
 
-- task: PublishSymbols@2
-  displayName: 'Publish symbols path'
-  inputs:
-    SearchPattern: '**\bin\**\*.pdb'
-    PublishSymbols: false
-  continueOnError: true
+    - task: VisualStudioTestPlatformInstaller@1
+      displayName: Visual Studio Test Platform Installer
+      inputs:
+        packageFeedSelector: nugetOrg
+        versionSelector: latestStable
 
-- task: CopyFiles@2
-  displayName: 'Copy Files to: $(build.artifactstagingdirectory)'
-  inputs:
-    SourceFolder: '$(system.defaultworkingdirectory)'
-    Contents: '**\$(Build.DefinitionName)\bin\Release\**'
-    TargetFolder: '$(build.artifactstagingdirectory)'
-  condition: succeededOrFailed()
+    - task: VSTest@2
+      displayName: VsTest - test assemblies
+      continueOnError: true
+      inputs:
+        testSelector: testAssemblies
+        testAssemblyVer2: |
+          **\*test*.dll
+          !**\*TestAdapter.dll
+          !**\obj\**
+        searchFolder: $(System.DefaultWorkingDirectory)
+        vsTestVersion: toolsInstaller
 
-- task: PublishBuildArtifacts@1
-  displayName: 'Publish Artifact: drop'
-  inputs:
-    PathtoPublish: '$(build.artifactstagingdirectory)'
-  condition: succeededOrFailed()
+    - powershell: Stop-SonetaTestInfrastructure
+      displayName: Stop integration tests infrastructure
+      condition: always()
+
+    - publish: $(System.DefaultWorkingDirectory)\bin
+      displayName: Publish artifacts
+      artifact: SamplesArtifacts
+
+- stage: Deploy
+  displayName: Deploy
+  dependsOn: Build_Test
+  condition: succeeded()
+  jobs:
+  - job: Deploy
+    displayName: Push NuGet packages to Azure Artifacts
+    pool:
+      name: Default
+
+    steps:
+    - checkout: none
+
+    - download: current
+      artifact: SamplesArtifacts
+
+    - task: NuGetToolInstaller@1
+      displayName: Install NuGet
+
+    - task: NuGetCommand@2
+      displayName: Push packages to Azure Artifacts
+      inputs:
+        command: push
+        nuGetFeedType: internal
+        publishVstsFeed: 'NAZWA_TWOJEGO_FEEDA'
+        packagesToPush: '$(Agent.BuildDirectory)/SamplesArtifacts/**/*.nupkg'
