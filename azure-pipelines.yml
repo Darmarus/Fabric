@@ -1,120 +1,144 @@
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
-  branches:
-    include:
-      - test
+- master
 
-resources:
-- repo: self
+pool:
+  name: Default
 
-stages:
-- stage: Build_Test
-  displayName: Build and test
-  jobs:
-  - job: Build_Test
-    displayName: Build and test
-    timeoutInMinutes: 300
-    pool:
-      vmImage: 'windows-latest'
+variables:
+  solution: '**/*.sln'
+  buildPlatform: 'Any CPU'
+  buildConfiguration: 'Release'
+  companyName: 'Agemit Sp. z o.o.'
+  trademarkName: 'MD'
 
-    steps:
-    - checkout: self
-      clean: true
+steps:
+- checkout: self
+  clean: true
 
-    - task: NuGetToolInstaller@1
-      displayName: Install NuGet
+- task: NuGetToolInstaller@1
+  displayName: 'Install NuGet'
 
-    - task: MSBuild@1
-      displayName: Restore and build
-      inputs:
-        solution: '**/*.csproj'
-        configuration: Debug
-        msbuildArguments: '/r /p:GeneratePackageOnBuild=true'
+- task: NuGetCommand@2
+  displayName: 'Restore NuGet packages'
+  inputs:
+    command: 'restore'
+    restoreSolution: '$(solution)'
 
-    - powershell: |
-        if (Get-ChildItem -Recurse -Filter *.UnitTest.csproj -File) {
-          Write-Host "##vso[task.setVariable variable=RunUnitTests]True"
+# Zamiennik dla Assembly-Info-NetFramework@2
+# Nie wymaga instalowania rozszerzenia z Marketplace.
+- powershell: |
+    $now = Get-Date
+    $version = "{0}.{1}.{2}.{3}" -f $now.ToString("yyMM"), "$(Build.BuildId)", $now.ToString("dd"), $now.ToString("HHmm")
+
+    Write-Host "Using version: $version"
+
+    $title = "$(Build.DefinitionName)"
+    $product = "$(Build.DefinitionName)"
+    $company = "$(companyName)"
+    $trademark = "$(trademarkName)"
+    $copyright = "Copyright © $($now.ToString("dd MMMM yyyy")) $(companyName)"
+
+    $files = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Include AssemblyInfo.cs,AssemblyInfo.vb,GlobalInfo.cs,GlobalInfo.vb -File
+
+    foreach ($file in $files) {
+      Write-Host "Updating $($file.FullName)"
+
+      $content = Get-Content $file.FullName -Raw
+
+      if ($file.Extension -eq ".cs") {
+        $replacements = @{
+          'AssemblyTitle' = $title
+          'AssemblyProduct' = $product
+          'AssemblyCompany' = $company
+          'AssemblyCopyright' = $copyright
+          'AssemblyTrademark' = $trademark
+          'AssemblyVersion' = $version
+          'AssemblyFileVersion' = $version
+          'AssemblyInformationalVersion' = $version
         }
-        else {
-          Write-Host "##vso[task.setVariable variable=RunUnitTests]False"
+
+        foreach ($key in $replacements.Keys) {
+          $value = $replacements[$key]
+
+          if ($content -match "\[assembly:\s*$key\(") {
+            $content = $content -replace "\[assembly:\s*$key\(""[^""]*""\)\]", "[assembly: $key(`"$value`")]"
+          }
+          else {
+            $content += "`r`n[assembly: $key(`"$value`")]"
+          }
         }
-      displayName: Discover unit tests
+      }
 
-    - task: DotNetCoreCLI@2
-      condition: and(succeeded(), eq(variables['RunUnitTests'], 'True'))
-      displayName: Run unit tests
-      inputs:
-        command: test
-        projects: '**/*.UnitTest.csproj'
-        arguments: '--no-build --configuration Debug'
-
-    - powershell: |
-        if (Get-Command Start-SonetaTestInfrastructure -ErrorAction SilentlyContinue) {
-          Start-SonetaTestInfrastructure
+      if ($file.Extension -eq ".vb") {
+        $replacements = @{
+          'AssemblyTitle' = $title
+          'AssemblyProduct' = $product
+          'AssemblyCompany' = $company
+          'AssemblyCopyright' = $copyright
+          'AssemblyTrademark' = $trademark
+          'AssemblyVersion' = $version
+          'AssemblyFileVersion' = $version
+          'AssemblyInformationalVersion' = $version
         }
-        else {
-          Write-Host "Start-SonetaTestInfrastructure not found, skipping."
+
+        foreach ($key in $replacements.Keys) {
+          $value = $replacements[$key]
+
+          if ($content -match "<Assembly:\s*$key\(") {
+            $content = $content -replace "<Assembly:\s*$key\(""[^""]*""\)>", "<Assembly: $key(`"$value`")>"
+          }
+          else {
+            $content += "`r`n<Assembly: $key(`"$value`")>"
+          }
         }
-      displayName: Start integration tests infrastructure
-      continueOnError: true
+      }
 
-    - task: VisualStudioTestPlatformInstaller@1
-      displayName: Visual Studio Test Platform Installer
-      inputs:
-        packageFeedSelector: nugetOrg
-        versionSelector: latestStable
+      Set-Content -Path $file.FullName -Value $content -Encoding UTF8
+    }
 
-    - task: VSTest@2
-      displayName: VsTest - test assemblies
-      continueOnError: true
-      inputs:
-        testSelector: testAssemblies
-        testAssemblyVer2: |
-          **\*test*.dll
-          !**\*TestAdapter.dll
-          !**\obj\**
-        searchFolder: $(System.DefaultWorkingDirectory)
-        vsTestVersion: toolsInstaller
+    # Dla projektów SDK-style można dodatkowo ustawić zmienne dla MSBuild.
+    Write-Host "##vso[task.setVariable variable=PackageVersion]$version"
+    Write-Host "##vso[task.setVariable variable=AssemblyVersion]$version"
+    Write-Host "##vso[task.setVariable variable=FileVersion]$version"
+    Write-Host "##vso[task.setVariable variable=InformationalVersion]$version"
+  displayName: 'Update assembly version info'
 
-    - powershell: |
-        if (Get-Command Stop-SonetaTestInfrastructure -ErrorAction SilentlyContinue) {
-          Stop-SonetaTestInfrastructure
-        }
-        else {
-          Write-Host "Stop-SonetaTestInfrastructure not found, skipping."
-        }
-      displayName: Stop integration tests infrastructure
-      condition: always()
-      continueOnError: true
+- task: VSBuild@1
+  displayName: 'Build solution'
+  inputs:
+    solution: '$(solution)'
+    platform: '$(buildPlatform)'
+    configuration: '$(buildConfiguration)'
+    msbuildArgs: >
+      /p:GeneratePackageOnBuild=true
+      /p:Version=$(PackageVersion)
+      /p:AssemblyVersion=$(AssemblyVersion)
+      /p:FileVersion=$(FileVersion)
+      /p:InformationalVersion=$(InformationalVersion)
 
-    - publish: $(System.DefaultWorkingDirectory)\bin
-      displayName: Publish artifacts
-      artifact: SamplesArtifacts
+- task: PublishSymbols@2
+  displayName: 'Publish symbols path'
+  inputs:
+    SearchPattern: '**\bin\**\*.pdb'
+    PublishSymbols: false
+  continueOnError: true
 
-- stage: Deploy
-  displayName: Deploy
-  dependsOn: Build_Test
-  condition: succeeded()
-  jobs:
-  - job: Deploy
-    displayName: Push NuGet packages to Azure Artifacts
-    pool:
-      vmImage: 'windows-latest'
+- task: CopyFiles@2
+  displayName: 'Copy build output to artifact staging directory'
+  inputs:
+    SourceFolder: '$(System.DefaultWorkingDirectory)'
+    Contents: |
+      **\bin\Release\**
+      **\*.nupkg
+      !**\obj\**
+    TargetFolder: '$(Build.ArtifactStagingDirectory)'
+  condition: succeededOrFailed()
 
-    steps:
-    - checkout: none
-
-    - download: current
-      artifact: SamplesArtifacts
-
-    - task: NuGetToolInstaller@1
-      displayName: Install NuGet
-
-    - task: NuGetCommand@2
-      displayName: Push packages to Azure Artifacts
-      inputs:
-        command: push
-        nuGetFeedType: internal
-        publishVstsFeed: 'NAZWA_TWOJEGO_FEEDA'
-        packagesToPush: '$(Agent.BuildDirectory)/SamplesArtifacts/**/*.nupkg'
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish artifact: drop'
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'drop'
+  condition: succeededOrFailed()
