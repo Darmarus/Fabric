@@ -1,144 +1,111 @@
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
-- master
+- test
 
-pool:
-  name: Default
+resources:
+- repo: self
 
 variables:
-  solution: '**/*.sln'
-  buildPlatform: 'Any CPU'
   buildConfiguration: 'Release'
-  companyName: 'Agemit Sp. z o.o.'
-  trademarkName: 'MD'
+  buildVersion: '$(Build.BuildNumber)'
+  projects: '**/*.csproj'
+  testProjects: '**/*.UnitTest.csproj'
 
-steps:
-- checkout: self
-  clean: true
+stages:
+- stage: Build_Test
+  displayName: Build and test
 
-- task: NuGetToolInstaller@1
-  displayName: 'Install NuGet'
+  jobs:
+  - job: Build_Test
+    displayName: Build and test
+    timeoutInMinutes: 300
+    pool:
+      name: Default
 
-- task: NuGetCommand@2
-  displayName: 'Restore NuGet packages'
-  inputs:
-    command: 'restore'
-    restoreSolution: '$(solution)'
+    steps:
+    - checkout: self
+      clean: true
 
-# Zamiennik dla Assembly-Info-NetFramework@2
-# Nie wymaga instalowania rozszerzenia z Marketplace.
-- powershell: |
-    $now = Get-Date
-    $version = "{0}.{1}.{2}.{3}" -f $now.ToString("yyMM"), "$(Build.BuildId)", $now.ToString("dd"), $now.ToString("HHmm")
+    - task: NuGetToolInstaller@1
+      displayName: Install NuGet
 
-    Write-Host "Using version: $version"
+    - task: DotNetCoreCLI@2
+      displayName: Restore
+      inputs:
+        command: restore
+        projects: '$(projects)'
 
-    $title = "$(Build.DefinitionName)"
-    $product = "$(Build.DefinitionName)"
-    $company = "$(companyName)"
-    $trademark = "$(trademarkName)"
-    $copyright = "Copyright © $($now.ToString("dd MMMM yyyy")) $(companyName)"
+    - task: DotNetCoreCLI@2
+      displayName: Build
+      inputs:
+        command: build
+        projects: '$(projects)'
+        arguments: >
+          --configuration $(buildConfiguration)
+          --no-restore
+          /p:Version=$(buildVersion)
+          /p:AssemblyVersion=$(buildVersion)
+          /p:FileVersion=$(buildVersion)
+          /p:InformationalVersion=$(buildVersion)
 
-    $files = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Include AssemblyInfo.cs,AssemblyInfo.vb,GlobalInfo.cs,GlobalInfo.vb -File
-
-    foreach ($file in $files) {
-      Write-Host "Updating $($file.FullName)"
-
-      $content = Get-Content $file.FullName -Raw
-
-      if ($file.Extension -eq ".cs") {
-        $replacements = @{
-          'AssemblyTitle' = $title
-          'AssemblyProduct' = $product
-          'AssemblyCompany' = $company
-          'AssemblyCopyright' = $copyright
-          'AssemblyTrademark' = $trademark
-          'AssemblyVersion' = $version
-          'AssemblyFileVersion' = $version
-          'AssemblyInformationalVersion' = $version
+    - powershell: |
+        if (Get-ChildItem -Recurse -Filter *.UnitTest.csproj -File) {
+          Write-Host "##vso[task.setVariable variable=RunUnitTests]True"
         }
-
-        foreach ($key in $replacements.Keys) {
-          $value = $replacements[$key]
-
-          if ($content -match "\[assembly:\s*$key\(") {
-            $content = $content -replace "\[assembly:\s*$key\(""[^""]*""\)\]", "[assembly: $key(`"$value`")]"
-          }
-          else {
-            $content += "`r`n[assembly: $key(`"$value`")]"
-          }
+        else {
+          Write-Host "##vso[task.setVariable variable=RunUnitTests]False"
         }
-      }
+      displayName: Discover unit tests
 
-      if ($file.Extension -eq ".vb") {
-        $replacements = @{
-          'AssemblyTitle' = $title
-          'AssemblyProduct' = $product
-          'AssemblyCompany' = $company
-          'AssemblyCopyright' = $copyright
-          'AssemblyTrademark' = $trademark
-          'AssemblyVersion' = $version
-          'AssemblyFileVersion' = $version
-          'AssemblyInformationalVersion' = $version
-        }
+    - task: DotNetCoreCLI@2
+      condition: and(succeeded(), eq(variables['RunUnitTests'], 'True'))
+      displayName: Run unit tests
+      inputs:
+        command: test
+        projects: '$(testProjects)'
+        arguments: >
+          --configuration $(buildConfiguration)
+          --no-build
 
-        foreach ($key in $replacements.Keys) {
-          $value = $replacements[$key]
+    - task: DotNetCoreCLI@2
+      displayName: Pack NuGet packages
+      inputs:
+        command: pack
+        packagesToPack: '$(projects)'
+        nobuild: true
+        versioningScheme: byEnvVar
+        versionEnvVar: buildVersion
+        arguments: >
+          --configuration $(buildConfiguration)
+          --output $(Build.ArtifactStagingDirectory)
 
-          if ($content -match "<Assembly:\s*$key\(") {
-            $content = $content -replace "<Assembly:\s*$key\(""[^""]*""\)>", "<Assembly: $key(`"$value`")>"
-          }
-          else {
-            $content += "`r`n<Assembly: $key(`"$value`")>"
-          }
-        }
-      }
+    - publish: $(Build.ArtifactStagingDirectory)
+      displayName: Publish artifacts
+      artifact: SamplesArtifacts
 
-      Set-Content -Path $file.FullName -Value $content -Encoding UTF8
-    }
+- stage: Deploy
+  displayName: Deploy
+  dependsOn: Build_Test
+  condition: succeeded()
 
-    # Dla projektów SDK-style można dodatkowo ustawić zmienne dla MSBuild.
-    Write-Host "##vso[task.setVariable variable=PackageVersion]$version"
-    Write-Host "##vso[task.setVariable variable=AssemblyVersion]$version"
-    Write-Host "##vso[task.setVariable variable=FileVersion]$version"
-    Write-Host "##vso[task.setVariable variable=InformationalVersion]$version"
-  displayName: 'Update assembly version info'
+  jobs:
+  - job: Deploy
+    displayName: Push NuGet packages
+    pool:
+      name: Default
 
-- task: VSBuild@1
-  displayName: 'Build solution'
-  inputs:
-    solution: '$(solution)'
-    platform: '$(buildPlatform)'
-    configuration: '$(buildConfiguration)'
-    msbuildArgs: >
-      /p:GeneratePackageOnBuild=true
-      /p:Version=$(PackageVersion)
-      /p:AssemblyVersion=$(AssemblyVersion)
-      /p:FileVersion=$(FileVersion)
-      /p:InformationalVersion=$(InformationalVersion)
+    steps:
+    - checkout: none
 
-- task: PublishSymbols@2
-  displayName: 'Publish symbols path'
-  inputs:
-    SearchPattern: '**\bin\**\*.pdb'
-    PublishSymbols: false
-  continueOnError: true
+    - download: current
+      artifact: SamplesArtifacts
 
-- task: CopyFiles@2
-  displayName: 'Copy build output to artifact staging directory'
-  inputs:
-    SourceFolder: '$(System.DefaultWorkingDirectory)'
-    Contents: |
-      **\bin\Release\**
-      **\*.nupkg
-      !**\obj\**
-    TargetFolder: '$(Build.ArtifactStagingDirectory)'
-  condition: succeededOrFailed()
+    - task: NuGetToolInstaller@1
+      displayName: Install NuGet
 
-- task: PublishBuildArtifacts@1
-  displayName: 'Publish artifact: drop'
-  inputs:
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-    ArtifactName: 'drop'
-  condition: succeededOrFailed()
+    - task: NuGetCommand@2
+      displayName: Push packages to NuGet.org
+      inputs:
+        command: push
+        packagesToPush: '$(Agent.BuildDirectory)/SamplesArtifacts/**/*.nupkg'
