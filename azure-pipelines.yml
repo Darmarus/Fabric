@@ -21,7 +21,10 @@ stages:
     displayName: Build and test
     timeoutInMinutes: 300
     pool:
-      name: Default
+     vmImage: 'windows-latest'
+     demands:
+      - msbuild
+      - visualstudio
 
     steps:
     - checkout: self
